@@ -1,0 +1,43 @@
+server {
+  server_name www.example.com;
+  rewrite ^(.*) http://example.com$1 permanent;
+}
+
+
+# your ssl conf
+
+server {
+    listen 443 ssl deferred;
+    server_name example.com;
+
+    ssl_certificate /etc/nginx/certs/example-com-chained.pem;
+    # ssl_trusted_certificate /etc/nginx/certs/example-com-chained.pem;
+    ssl_certificate_key /etc/nginx/certs/example-com.key;
+    ssl_dhparam /etc/nginx/certs/dhparam.pem;
+
+
+    # This creates a reverse proxy to vidup, which is configured to run locally on 127.0.0.1:7777
+
+    location /vidup/ {
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection Upgrade;
+        proxy_http_version 1.1;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $host;
+        proxy_pass http://localhost:7777/;
+    }
+}
+
+# your usual webserver conf
+
+server {
+    listen 80;
+    server_name example.com;
+
+    location / {
+        root /var/www/example.com/public_html/;
+        try_files $uri $uri/ /index.html /index.php;
+        include /etc/nginx/php_conf;
+        include /etc/nginx/block_conf;
+    }
+}
