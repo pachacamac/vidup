@@ -67,16 +67,17 @@ __END__
         animation: blinker 1s cubic-bezier(.5, 0, 1, 1) infinite alternate;
         -webkit-animation: blinker 1s cubic-bezier(.5, 0, 1, 1) infinite alternate; }
       #video { height: 100vh; width: 100vw; position: absolute; top: 0; bottom: 0; left: 0; right: 0; margin: auto; }
-      #remote-video { height: 100%; }
-      #local-video { left: 0; top: 0; position: absolute; z-index: 10; height: 20vh; }
+      .big-video { height: 100%; }
+      .small-video { left: 0; top: 0; position: absolute; z-index: 10; height: 20vh; }
+      .split-video { height: 50vh; width: 100vw; position: relative; display: block; }
       .mirror { -webkit-transform:scaleX(-1); -moz-transform:scaleX(-1); transform:scaleX(-1); }
     </style>
   </head>
   <body>
     <h2 id="notice">&#x21e7; Please allow this &#x21e7;</h2>
     <div id="video" class="ceterflex">
-      <video id="remote-video" autoplay="true" controls="true"></video>
-      <video id="local-video" class="mirror" autoplay="true" controls="true" muted="true"></video>
+      <video id="remote-video" class="split-video" autoplay="true" controls="true"></video>
+      <video id="local-video" class="split-video mirror" autoplay="true" controls="true" muted="true"></video>
     </div>
     <script>
       /* MIT License: https://webrtc-experiment.appspot.com/licence/ */
@@ -225,6 +226,24 @@ __END__
       }
       document.getElementById('local-video').addEventListener('click', requestFullscreen);
       document.getElementById('local-video').addEventListener('touch', requestFullscreen);
+
+      function toggleLayout(){
+        var local = document.getElementById('local-video');
+        var remote = document.getElementById('remote-video');
+        if(local.classList.contains('small-video')){
+          local.classList.remove('small-video');
+          remote.classList.remove('big-video');
+          local.classList.add('split-video');
+          remote.classList.add('split-video');
+        }else{
+          local.classList.remove('split-video');
+          remote.classList.remove('split-video');
+          local.classList.add('small-video');
+          remote.classList.add('big-video');
+        }
+      }
+      document.getElementById('remote-video').addEventListener('click', toggleLayout);
+      document.getElementById('remote-video').addEventListener('touch', toggleLayout);
 
       if(!(/Chrome/.test(navigator.userAgent) && /Google Inc/.test(navigator.vendor))){
         alert("Seems like you're not using Chrome. Go ahead and try but take this as a fair warning: I never got this to work right in anything else but Chrome.");
