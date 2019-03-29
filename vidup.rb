@@ -1,68 +1,101 @@
-require 'busker'
-require 'em-websocket'
+require 'sinatra'
+require 'sinatra-websocket'
+require 'thin'
+require 'yaml'
 
-module EventMachine
-  module WebSocket
-    class Connection < EventMachine::Connection
-      def remote_ip
-        get_peername[2,6].unpack('nC4')[1..4].join('.')
-      end
+CONFIG = YAML.load_file('config.yml')
+
+$logger = Logger.new(STDERR)
+$logger.level = Logger::INFO
+
+set :server, 'thin'
+set :port, CONFIG['port'] || 9443
+set :bind, CONFIG['bind'] || '0.0.0.0'
+set :environment, :production
+set :server_settings, {
+  backend: Class.new(::Thin::Backends::TcpServer){
+    def initialize(host, port, options)
+      super(host, port)
+      @ssl = true
+      @ssl_options = options
     end
+  },
+  cert_chain_file: CONFIG['server_crt'],
+  private_key_file: CONFIG['server_key'],
+  verify_peer: false
+}
+set namespaces: {}
+
+get '/:namespace?/?' do
+  $logger.info("REQUEST NS:#{params[:namespace]}, WS?:#{request.websocket? ? 'Y' : 'N'}")
+  if request.websocket?
+    request.websocket do |socket|
+      client_id = Digest::MD5.hexdigest(socket.hash.to_s)
+      namespace = "#{params[:namespace]}"
+
+      socket.onopen do
+        $logger.info("CONNECTED #{namespace}/#{client_id}")
+        begin
+          settings.namespaces[namespace] ||= {}
+          settings.namespaces[namespace][client_id] = socket
+        rescue
+          $logger.error("#{$!} - #{$@.join("\n")}")
+        end
+      end
+
+      socket.onclose do
+        $logger.info("DISCONNECTED\t#{namespace}/#{client_id}")
+        begin
+          settings.namespaces[namespace].delete(client_id)
+          settings.namespaces.delete(namespace) if settings.namespaces[namespace].empty?
+        rescue
+          $logger.error("#{$!} - #{$@.join("\n")}")
+        end
+      end
+
+      socket.onmessage do |msg|
+        $logger.info("MESSAGE\t#{namespace}/#{client_id} : #{msg}")
+        EM.next_tick do
+          begin
+            settings.namespaces[namespace].each{|k,v| v.send(msg) if k != client_id}
+          rescue
+            $logger.error("#{$!} - #{$@.join("\n")}")
+          end
+        end
+      end
+
+    end
+  else
+    erb :main
   end
 end
-
-Thread.new {
-  @ws_clients = []
-  EM.run do
-    EM::WebSocket.run(:host => "0.0.0.0", :port => 8008) do |ws|
-      ws.onopen do |handshake|
-        puts "WebSocket connection opened from #{ws.remote_ip}"
-        @ws_clients << ws
-      end
-
-      ws.onclose do
-        puts "WebSocket connection closed"
-        @ws_clients.delete(ws)
-      end
-
-      ws.onmessage do |msg|
-        puts "WebSocket received message '#{msg}'"
-        @ws_clients.each{|e| e.send(msg) if e != ws}
-      end
-    end
-  end
-}
-
-Busker::Busker.new(:port => 8000) do
-  route '/' do
-    render :main
-  end
-end.start
 
 __END__
 @@ main
 <!DOCTYPE html>
 <html>
   <head>
-    <title>WebRTC P2P Videochat</title>
+    <title>Vidup - WebRTC P2P Videochat</title>
     <style>
-      body{ background: #333; }
+      body{ background: #333; overflow: hidden; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
       @keyframes blinker { from { opacity: 1; } to { opacity: 0; }}
       @-webkit-keyframes blinker { from { opacity: 1; } to { opacity: 0; }}
-      #notice { color: white; margin-left: 23%;
+      #notice { color: white; margin-left: 23%; z-index: 20; position: absolute;
         animation: blinker 1s cubic-bezier(.5, 0, 1, 1) infinite alternate;
         -webkit-animation: blinker 1s cubic-bezier(.5, 0, 1, 1) infinite alternate; }
-      #video { width: 640px; height: 480px; position: absolute; top:0; bottom: 0; left: 0; right: 0; margin: auto; }
-      #remote-video { width: 640px; height: 480px; }
-      #local-video { left: 0; top: 0; position: absolute; z-index: 1; width: 160px; height: 120px; }
+      #video { height: 100vh; width: 100vw; position: absolute; top: 0; bottom: 0; left: 0; right: 0; margin: auto; }
+      .big-video { height: 100%; }
+      .small-video { left: 0; top: 0; position: absolute; z-index: 10; height: 20vh; }
+      .split-video { height: 50vh; width: 100vw; position: relative; display: block; }
       .mirror { -webkit-transform:scaleX(-1); -moz-transform:scaleX(-1); transform:scaleX(-1); }
     </style>
   </head>
   <body>
     <h2 id="notice">&#x21e7; Please allow this &#x21e7;</h2>
     <div id="video" class="ceterflex">
-      <video id="remote-video" autoplay="true" controls="true"></video>
-      <video id="local-video" class="mirror" autoplay="true" controls="true" muted="true"></video>
+      <video id="remote-video" class="split-video" autoplay="true" controls="true"></video>
+      <video id="local-video" class="split-video mirror" autoplay="true" controls="true" muted="true"></video>
     </div>
     <script>
       /* MIT License: https://webrtc-experiment.appspot.com/licence/ */
@@ -70,68 +103,52 @@ __END__
       /* Demo & Documentation: http://bit.ly/RTCPeerConnection-Documentation */
       window.moz = !! navigator.mozGetUserMedia;
       var PeerConnection = function (options) {
-          var PeerConnection = window.mozRTCPeerConnection || window.webkitRTCPeerConnection,
+          var PeerConnection = window.mozRTCPeerConnection || window.webkitRTCPeerConnection || window.RTCPeerConnection,
               SessionDescription = window.mozRTCSessionDescription || window.RTCSessionDescription,
               IceCandidate = window.mozRTCIceCandidate || window.RTCIceCandidate;
-
           // See https://gist.github.com/zziuni/3741933 for a list of public STUN servers
-          var iceServers = { iceServers: [{url: 'stun:stun.stunprotocol.org'}, {url: 'stun:stunserver.org'},
-                                          {url: 'stun:stun.l.google.com:19302'}, {url: 'stun:stun.schlund.de'},
+          // https://gist.github.com/sagivo/3a4b2f2c7ac6e1b5267c2f1f59ac6c6b
+          var iceServers = { iceServers: [{url: 'stun:stun.services.mozilla.org'}, {url: 'stun:stun.l.google.com:19305'},
+                                          {url: 'stun:stun.stunprotocol.org'}, {url: 'stun:stunserver.org'},
+                                          {url: 'stun:stun.schlund.de'}, {url: 'stun:stun01.sipphone.com'},
                                           {url: 'turn:numb.viagenie.ca', credential: 'muazkh', username: 'webrtc@live.com'},
                                           {url: 'turn:192.158.29.39:3478?transport=udp', credential: 'JZEOEt2V3Qb0y27GRntt2u2PAYA=', username: '28224511:1379330808'},
                                           {url: 'turn:192.158.29.39:3478?transport=tcp', credential: 'JZEOEt2V3Qb0y27GRntt2u2PAYA=', username: '28224511:1379330808'}]};
-
           var optional = { optional: [] };
           // See http://www.webrtc.org/interop under "Constraints / configurations issues."
           if (!moz) optional.optional = [{ DtlsSrtpKeyAgreement: true }];
-
           var peerConnection = new PeerConnection(iceServers, optional);
-          peerConnection.onicecandidate = function(event) {
-              if (!event.candidate) return;
-              options.onicecandidate(event.candidate);
-          }
-          peerConnection.onaddstream = function(event) {
-              console.log('------------onaddstream');
-              options.onaddstream(event.stream);
-          }
+          peerConnection.onicecandidate = function(event) { if(event.candidate){ options.onicecandidate(event.candidate) } }
+          peerConnection.onaddstream = function(event) { console.log('onaddstream'); options.onaddstream(event.stream) }
 
           var constraints = options.constraints || {
               optional: [],
               mandatory: { OfferToReceiveAudio: true, OfferToReceiveVideo: true }
           };
           if (moz) constraints.mandatory.MozDontOfferDataChannel = true;
-
           return {
               createOffer: function (callback) {
                   peerConnection.createOffer(function (sessionDescription) {
                       peerConnection.setLocalDescription(sessionDescription);
                       callback(sessionDescription);
-                  }, null, constraints);
+                  }, function(e){console.log(e)}, constraints);
               },
-
               createAnswer: function (offerSDP, callback) {
                   peerConnection.setRemoteDescription(new SessionDescription(offerSDP));
                   peerConnection.createAnswer(function (sessionDescription) {
                       peerConnection.setLocalDescription(sessionDescription);
                       callback(sessionDescription);
-                  }, null, constraints);
+                  }, function(e){console.log(e)}, constraints);
               },
-
               setRemoteDescription: function (sdp) {
-                  console.log('--------adding answer sdp:');
-                  console.log(sdp.sdp);
+                  console.log('adding answer sdp:', sdp.sdp);
                   sdp = new SessionDescription(sdp);
                   peerConnection.setRemoteDescription(sdp);
               },
-
               addICECandidate: function (candidate) {
-                  console.log("addICE: got candidate: " + candidate.candidate);
-                  peerConnection.addIceCandidate(new IceCandidate({
-                              sdpMLineIndex: candidate.sdpMLineIndex,
-                              candidate: candidate.candidate
-                          }));
+                  console.log('addICE: got candidate: ', candidate.candidate);
+                  peerConnection.addIceCandidate(new IceCandidate({ sdpMLineIndex: candidate.sdpMLineIndex, candidate: candidate.candidate }));
               },
-
               addStream: function(stream) {
                   console.log("stream provided, attaching...");
                   peerConnection.addStream(stream);
@@ -142,17 +159,16 @@ __END__
     <script>
       /* MIT License: https://webrtc-experiment.appspot.com/licence/ */
       var call = function (config) {
-          var wsAddr = 'ws://'+document.location.hostname;
-          var port = config.wsPort || document.location.port;
-          if(port) wsAddr += ':'+port;
-          var peerConnection = PeerConnection(makePeerConfig()), webSocket = new WebSocket(wsAddr+'/');
+          var wsAddr = 'wss://' + window.location.host + window.location.pathname;
+          var peerConnection = PeerConnection(makePeerConfig());
+          var webSocket = new WebSocket(wsAddr);
           // configure the signalling WebSocket
           webSocket.onmessage = function (event) {
-              console.log("received a message: " + event.data);
+              console.log('received a message: ', event.data);
               onIncomingMessage(JSON.parse(event.data));
           };
           webSocket.push = webSocket.send;
-          webSocket.send = function (data) { webSocket.push(JSON.stringify(data)); };
+          webSocket.send = function(data) { webSocket.push(JSON.stringify(data)); };
           function onIncomingMessage(response) {
               // the other client has sent me an offer SDP
               if (response.offerSDP) {
@@ -174,7 +190,6 @@ __END__
                   });
               }
           }
-
           // PeerConnection.js's options structure
           function makePeerConfig() {
               return {
@@ -189,12 +204,15 @@ __END__
                   },
                   onaddstream: function (stream) {
                       console.log("onRemoteStream");
-                      config.video['src'] = URL.createObjectURL(stream);
+                      try {
+                        config.video['srcObject'] = stream
+                      } catch (error) {
+                        config.video['src'] = URL.createObjectURL(stream);
+                      }
                       clearInterval(callInterval); //TODO: is this a good place?
                   }
               };
           }
-
           return {
               initiateCall: function(localStream) {
                   peerConnection.addStream(localStream); // attach the stream to the peer connection
@@ -202,26 +220,62 @@ __END__
                   peerConnection.createOffer(function (sdp) {
                       console.log("sending offer SDP");
                       webSocket.send({ offerSDP: sdp })
-                  });
+                  }, function (e){ console.log(e) });
               }
           };
       };
     </script>
     <script>
       navigator.getUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
-      var config = { video: document.getElementById('remote-video'), wsPort: 8008 };
+      var config = { video: document.getElementById('remote-video') };
       var callPeer = call(config);
       var callInterval = null;
       navigator.getUserMedia({ audio: true, video: true },
           function (localStream) {
               video = document.getElementById('local-video');
-              video['src'] = URL.createObjectURL(localStream);
+              try {
+                video['srcObject'] = localStream
+              } catch (error) {
+                video['src'] = URL.createObjectURL(localStream);
+              }
               config.localStream = localStream;
               callInterval = setInterval(function(){ callPeer.initiateCall(config.localStream) }, 1000);
               document.getElementById('notice').style.display = 'none';
           },
           function (e) { console.error(e); }
       );
+
+      function requestFullscreen(){
+        var e = document.body;
+        if(e.requestFullscreen) e.requestFullscreen();
+        else if(e.webkitRequestFullscreen) e.webkitRequestFullscreen();
+        else if(e.mozRequestFullScreen) e.mozRequestFullScreen();
+        else if(e.msRequestFullscreen) e.msRequestFullscreen();
+      }
+      document.getElementById('local-video').addEventListener('click', requestFullscreen);
+      document.getElementById('local-video').addEventListener('touch', requestFullscreen);
+
+      function toggleLayout(){
+        var local = document.getElementById('local-video');
+        var remote = document.getElementById('remote-video');
+        if(local.classList.contains('small-video')){
+          local.classList.remove('small-video');
+          remote.classList.remove('big-video');
+          local.classList.add('split-video');
+          remote.classList.add('split-video');
+        }else{
+          local.classList.remove('split-video');
+          remote.classList.remove('split-video');
+          local.classList.add('small-video');
+          remote.classList.add('big-video');
+        }
+      }
+      document.getElementById('remote-video').addEventListener('click', toggleLayout);
+      document.getElementById('remote-video').addEventListener('touch', toggleLayout);
+
+      if(!(/Chrome/.test(navigator.userAgent) && /Google Inc/.test(navigator.vendor))){
+        alert("Seems like you're not using Chrome. Go ahead and try but take this as a fair warning: I never got this to work right in anything else but Chrome.");
+      }
     </script>
   </body>
 </html>

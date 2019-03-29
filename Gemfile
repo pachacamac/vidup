@@ -1,4 +1,5 @@
 source 'https://rubygems.org'
 
-gem 'em-websocket'
-gem 'busker'
+gem 'sinatra'
+gem 'sinatra-websocket'
+gem 'thin'
